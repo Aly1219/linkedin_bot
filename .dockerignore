@@ -1,10 +1,10 @@
 venv/
 browser_profile/
+__pycache__/
+*.pyc
 bot.log
-config.json
+run_output.txt
 all_followers.json
 perf.json
 debug_*
 memory/
-seen_followers.json
-run_output.txt

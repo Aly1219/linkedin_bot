@@ -1,0 +1,10 @@
+services:
+  linkedin-bot:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./browser_profile:/app/browser_profile
+      - ./seen_followers.json:/app/seen_followers.json
+    restart: unless-stopped
