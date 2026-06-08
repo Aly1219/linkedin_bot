@@ -3,8 +3,9 @@ LinkedIn Auto-Message Bot
 Détecte les nouveaux abonnés d'une Page LinkedIn et envoie un message automatique.
 
 Usage:
-    python linkedin_bot.py             # mode normal (envoi de messages)
-    python linkedin_bot.py --dry-run   # mode test : scrape les abonnés et les sauvegarde dans un fichier JSON sans envoyer de messages
+    python linkedin_bot.py                                      # mode normal (envoi de messages)
+    python linkedin_bot.py --dry-run                            # scrape les abonnés sans envoyer
+    python linkedin_bot.py --test-message <url_profil_linkedin> # envoie un message test à un profil spécifique
 
 Config:
     Remplir le fichier config.json avant de lancer.
@@ -190,6 +191,7 @@ class LinkedInBot:
             "Alle Follower anzeigen",
             "Mehr anzeigen",
         ]
+        btn_clicked = False
         for text in EXPAND_BTNS:
             try:
                 btn = self.page.locator(f"button:has-text('{text}')").first
@@ -197,16 +199,21 @@ class LinkedInBot:
                     btn.click()
                     log.info(f"  Cliqué '{text}'")
                     human_delay(3, 5)
+                    btn_clicked = True
                     break
             except Exception:
                 pass
+        if not btn_clicked:
+            log.warning("  ⚠️  Bouton 'Afficher tous les abonnés' non trouvé — scraping de la page telle quelle.")
+        self.page.screenshot(path="debug_followers_modal.png")
+        log.info("  Screenshot modal → debug_followers_modal.png")
 
         seen_urls: set[str] = set()
         followers: list[dict] = []
         last_count = 0
         no_new_count = 0
 
-        for _ in range(100):  # max 100 scrolls (1 000 abonnés)
+        for i in range(150):  # max 150 scrolls (~1 500 abonnés)
             cards = self.page.query_selector_all("a[href*='/in/']")
             for card in cards:
                 href = card.get_attribute("href")
@@ -224,86 +231,234 @@ class LinkedInBot:
 
             if len(followers) == last_count:
                 no_new_count += 1
-                if no_new_count >= 5:  # 4 scrolls sans nouveau = fin de liste
+                if no_new_count >= 8:  # 8 scrolls consécutifs sans nouveau = fin de liste
                     break
             else:
                 no_new_count = 0
                 last_count = len(followers)
                 log.info(f"  {len(followers)} abonnés chargés...")
 
-            # Scroller le container de la modale (scroll infini avec lazy-load)
-            self.page.evaluate("""() => {
-                // Remonter depuis un lien /in/ pour trouver le container scrollable de la modale
-                const link = document.querySelector('a[href*="/in/"]');
-                if (!link) { window.scrollBy(0, 800); return; }
-                let el = link.parentElement;
-                while (el && el !== document.body) {
-                    const s = window.getComputedStyle(el);
-                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll')
-                            && el.scrollHeight > el.clientHeight + 10) {
-                        el.scrollBy(0, 800);
-                        return;
+            # Scroller : essaie d'abord les containers connus de LinkedIn,
+            # puis remonte depuis un lien /in/, sinon scroll la fenêtre
+            scrolled = self.page.evaluate("""() => {
+                // 1. Containers connus de la modale LinkedIn
+                const MODAL_SELS = [
+                    '.artdeco-modal__content',
+                    '.scaffold-finite-scroll__content',
+                    '[data-finite-scroll-hotspot]',
+                    '.followers-list',
+                ];
+                for (const sel of MODAL_SELS) {
+                    const el = document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight + 10) {
+                        el.scrollBy(0, 1000);
+                        return sel;
                     }
-                    el = el.parentElement;
                 }
-                window.scrollBy(0, 800);
+                // 2. Remonter depuis un lien /in/
+                const link = document.querySelector('a[href*="/in/"]');
+                if (link) {
+                    let el = link.parentElement;
+                    while (el && el !== document.body) {
+                        const s = window.getComputedStyle(el);
+                        if ((s.overflowY === 'auto' || s.overflowY === 'scroll')
+                                && el.scrollHeight > el.clientHeight + 10) {
+                            el.scrollBy(0, 1000);
+                            return 'parent-of-link';
+                        }
+                        el = el.parentElement;
+                    }
+                }
+                // 3. Fallback : scroll fenêtre
+                window.scrollBy(0, 1000);
+                return 'window';
             }""")
+            if i < 3:
+                log.info(f"  Scroll {i+1} via : {scrolled}")
             human_delay(2.5, 3.5)  # Attendre le lazy-load (~1s requis par LinkedIn)
 
         log.info(f"  → {len(followers)} abonnés trouvés.")
         return followers
 
     def send_message(self, profile_url: str, name: str) -> bool:
-        """Ouvre le profil et envoie un message."""
+        """Ouvre le profil, récupère l'URL de composition et envoie un message."""
         try:
             log.info(f"  → Envoi message à {name} ({profile_url})")
             self.page.goto(profile_url)
-            human_delay(2, 4)
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                pass
+            human_delay(2, 3)
+            self.page.keyboard.press("Escape")
+            human_delay(0.5, 1)
 
-            # Cherche le bouton "Message"
-            msg_btn = self.page.query_selector("button:has-text('Message')")
-            if not msg_btn:
-                log.warning(f"  ⚠️  Bouton Message introuvable pour {name}")
+            # Le bouton "Message" sur un profil LinkedIn est un <a> vers /messaging/compose/
+            msg_href = self.page.evaluate("""() => {
+                const el = Array.from(document.querySelectorAll('a')).find(a => {
+                    if (!a.textContent.trim().toLowerCase().includes('message')) return false;
+                    if (a.closest('nav, header')) return false;
+                    const href = a.getAttribute('href') || '';
+                    if (!href.includes('messaging/compose')) return false;
+                    const r = a.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                });
+                return el ? el.getAttribute('href') : null;
+            }""")
+
+            if not msg_href:
+                self.page.screenshot(path="debug_message.png")
+                log.warning(f"  ⚠️  Lien Message introuvable pour {name} → debug_message.png")
                 return False
 
-            msg_btn.click()
-            human_delay(1.5, 3)
+            # Naviguer directement vers la page de composition (sans interop=msgOverlay)
+            compose_url = ("https://www.linkedin.com" + msg_href).replace("&interop=msgOverlay", "")
+            log.info(f"  Ouverture compose : {compose_url[:80]}...")
+            self.page.goto(compose_url)
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                pass
+            human_delay(2, 3)
+
+            if not self.message_template.strip():
+                log.error("  ❌ message_template vide dans config.json — remplis-le avant d'envoyer.")
+                return False
 
             first_name = name.split()[0] if name else "là"
             message = self.message_template.replace("{prenom}", first_name).replace("{nom}", name)
 
-            # Tape le message
-            text_box = self.page.query_selector("div[contenteditable='true']")
+            # Zone de texte de composition
+            text_box = None
+            for sel in ["div.msg-form__contenteditable", "div[contenteditable='true']", "[contenteditable='true']"]:
+                try:
+                    text_box = self.page.wait_for_selector(sel, timeout=8_000)
+                    if text_box:
+                        log.info(f"  Zone de texte trouvée ({sel})")
+                        break
+                except PlaywrightTimeout:
+                    continue
+
             if not text_box:
-                log.warning(f"  ⚠️  Zone de texte introuvable pour {name}")
+                self.page.screenshot(path="debug_message.png")
+                log.warning(f"  ⚠️  Zone de texte introuvable pour {name} → debug_message.png")
                 return False
 
-            text_box.click()
+            # Cliquer pour focuser, puis taper via le clavier (plus fiable sur contenteditable)
+            try:
+                text_box.click(timeout=10_000)
+            except PlaywrightTimeout:
+                log.warning(f"  ⚠️  Impossible de cliquer la zone de texte pour {name}")
+                self.page.screenshot(path="debug_message.png")
+                return False
             human_delay(0.5, 1)
-            text_box.type(message, delay=random.randint(30, 80))  # Frappe humaine
+            self.page.keyboard.type(message, delay=random.randint(30, 60))
             human_delay(1, 2)
 
-            # Envoi
-            send_btn = self.page.query_selector("button:has-text('Envoyer')")
-            if not send_btn:
-                send_btn = self.page.query_selector("button[type='submit']")
+            # Bouton d'envoi (classe CSS LinkedIn + texte multilingue)
+            send_btn = None
+            for sel in [
+                "button.msg-form__send-button",
+                "button[aria-label*='Envoyer']",
+                "button[aria-label*='Send']",
+                "button:has-text('Envoyer')",
+                "button:has-text('Send')",
+                "button:has-text('Senden')",
+            ]:
+                try:
+                    btn = self.page.locator(sel).last
+                    if btn.is_visible(timeout=2_000):
+                        send_btn = btn
+                        log.info(f"  Bouton Envoyer trouvé ({sel})")
+                        break
+                except Exception:
+                    continue
+
             if send_btn:
-                send_btn.click()
+                send_btn.click(timeout=10_000)
                 human_delay(1, 2)
                 log.info(f"  ✅ Message envoyé à {name}")
                 return True
             else:
-                log.warning(f"  ⚠️  Bouton Envoyer introuvable pour {name}")
+                self.page.screenshot(path="debug_message.png")
+                log.warning(f"  ⚠️  Bouton Envoyer introuvable pour {name} → debug_message.png")
                 return False
 
         except PlaywrightTimeout:
-            log.error(f"  ❌ Timeout pour {name}")
+            log.error(f"  ❌ Timeout pour {name} (URL: {self.page.url})")
+            self.page.screenshot(path="debug_message.png")
+            log.error(f"  Screenshot → debug_message.png")
             return False
         except Exception as e:
             log.error(f"  ❌ Erreur pour {name} : {e}")
             return False
 
+    def simulate_message(self, profile_url: str, name: str) -> bool:
+        """Vérifie que le message est prêt à envoyer sans l'envoyer."""
+        try:
+            self.page.goto(profile_url)
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                pass
+            human_delay(2, 3)
+            self.page.keyboard.press("Escape")
+            human_delay(0.5, 1)
+
+            msg_href = self.page.evaluate("""() => {
+                const el = Array.from(document.querySelectorAll('a')).find(a => {
+                    if (!a.textContent.trim().toLowerCase().includes('message')) return false;
+                    if (a.closest('nav, header')) return false;
+                    const href = a.getAttribute('href') || '';
+                    if (!href.includes('messaging/compose')) return false;
+                    const r = a.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                });
+                return el ? el.getAttribute('href') : null;
+            }""")
+
+            if not msg_href:
+                log.warning(f"  ⚠️  Lien Message introuvable pour {name}")
+                return False
+
+            compose_url = ("https://www.linkedin.com" + msg_href).replace("&interop=msgOverlay", "")
+            self.page.goto(compose_url)
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=15_000)
+            except PlaywrightTimeout:
+                pass
+            human_delay(2, 3)
+
+            text_box = None
+            for sel in ["div.msg-form__contenteditable", "div[contenteditable='true']", "[contenteditable='true']"]:
+                try:
+                    text_box = self.page.wait_for_selector(sel, timeout=8_000)
+                    if text_box:
+                        break
+                except PlaywrightTimeout:
+                    continue
+
+            if not text_box:
+                log.warning(f"  ⚠️  Zone de texte introuvable pour {name}")
+                return False
+
+            first_name = name.split()[0] if name else "là"
+            message = self.message_template.replace("{prenom}", first_name).replace("{nom}", name)
+            log.info(f'  ✅ Message prêt à être envoyé pour {name} : "{message}"')
+            return True
+
+        except Exception as e:
+            log.error(f"  ❌ Erreur simulation pour {name} : {e}")
+            return False
+
 # ─── Pipeline principal ────────────────────────────────────────────────────────
+
+def save_perf(perf: dict):
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    path = Path(f"perf_{ts}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(perf, f, indent=2, ensure_ascii=False)
+    log.info(f"📊 Performances sauvegardées → {path}")
 
 def save_all_followers(followers: list[dict]):
     """Sauvegarde tous les abonnés dans un fichier JSON horodaté."""
@@ -313,41 +468,114 @@ def save_all_followers(followers: list[dict]):
         json.dump(followers, f, indent=2, ensure_ascii=False)
     log.info(f"📄 {len(followers)} abonné(s) sauvegardé(s) dans {output_file}")
 
-def run():
+def _parse_args():
     dry_run = "--dry-run" in sys.argv
+    simulate = "--simulate" in sys.argv
+    test_url = None
+    if "--test-message" in sys.argv:
+        idx = sys.argv.index("--test-message")
+        if idx + 1 < len(sys.argv):
+            test_url = sys.argv[idx + 1]
+        else:
+            raise SystemExit("Usage : python linkedin_bot.py --test-message <https://www.linkedin.com/in/andrea-milano/>")
+    return dry_run, simulate, test_url
+
+def _duration(start: float) -> float:
+    return round(time.time() - start, 1)
+
+def run():
+    dry_run, simulate, test_url = _parse_args()
     config = load_config()
     seen = load_seen()
     bot = LinkedInBot(config)
 
+    run_start = time.time()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     log.info("=" * 50)
-    mode_label = "DRY-RUN (pas d'envoi)" if dry_run else "ENVOI ACTIF"
-    log.info(f"Démarrage pipeline [{mode_label}] — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if test_url:
+        mode_label = f"TEST MESSAGE → {test_url}"
+    elif simulate:
+        mode_label = "SIMULATION (pipeline complet, aucun message envoyé)"
+    elif dry_run:
+        mode_label = "DRY-RUN (scraping seul)"
+    else:
+        mode_label = "ENVOI ACTIF"
+    log.info(f"Démarrage pipeline [{mode_label}] — {now_str}")
+
+    perf = {
+        "date": now_str,
+        "mode": mode_label,
+        "login_s": None,
+        "scraping_s": None,
+        "messages": [],
+        "total_s": None,
+    }
 
     with sync_playwright() as p:
         bot.start(p)
         try:
+            t = time.time()
             bot.login()
+            perf["login_s"] = _duration(t)
+            log.info(f"  ⏱ Login : {perf['login_s']}s")
+
+            if test_url:
+                name = input("Prénom/Nom de la personne de test (ex: Marie Dupont) : ").strip() or "Test"
+                log.info(f"Envoi d'un message test à {name} ({test_url})...")
+                t = time.time()
+                success = bot.send_message(test_url, name)
+                perf["messages"].append({"name": name, "url": test_url, "success": success, "duration_s": _duration(t)})
+                if success:
+                    log.info("✅ Message test envoyé avec succès.")
+                else:
+                    log.error("❌ Échec de l'envoi du message test.")
+                perf["total_s"] = _duration(run_start)
+                save_perf(perf)
+                return
+
+            t = time.time()
             followers = bot.get_followers()
+            perf["scraping_s"] = _duration(t)
+            log.info(f"  ⏱ Scraping : {perf['scraping_s']}s")
 
             if dry_run:
                 save_all_followers(followers)
+                perf["total_s"] = _duration(run_start)
+                save_perf(perf)
                 log.info("Mode dry-run terminé. Aucun message envoyé.")
                 return
 
             new_followers = [f for f in followers if f["url"] not in seen]
-            log.info(f"{len(new_followers)} nouveau(x) abonné(s) détecté(s).")
+            log.info(f"{len(new_followers)} nouveau(x) abonné(s) à traiter.")
+
+            if simulate:
+                for follower in new_followers:
+                    log.info(f"→ Message à envoyer à {follower['name']}")
+                    t = time.time()
+                    success = bot.simulate_message(follower["url"], follower["name"])
+                    perf["messages"].append({"name": follower["name"], "url": follower["url"], "success": success, "duration_s": _duration(t)})
+                    human_delay(3, 5)
+                perf["total_s"] = _duration(run_start)
+                save_perf(perf)
+                log.info("Simulation terminée. Aucun message envoyé, seen_followers.json inchangé.")
+                return
 
             for follower in new_followers:
+                t = time.time()
                 success = bot.send_message(follower["url"], follower["name"])
+                perf["messages"].append({"name": follower["name"], "url": follower["url"], "success": success, "duration_s": _duration(t)})
                 if success:
                     seen.add(follower["url"])
-                    save_seen(seen)  # Sauvegarde après chaque envoi
-                human_delay(10, 20)  # Pause entre chaque message
+                    save_seen(seen)
+                human_delay(10, 20)
 
         finally:
             bot.stop()
 
-    log.info("Pipeline terminé.")
+    perf["total_s"] = _duration(run_start)
+    save_perf(perf)
+    log.info(f"Pipeline terminé en {perf['total_s']}s.")
 
 if __name__ == "__main__":
     run()

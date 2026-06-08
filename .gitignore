@@ -2,3 +2,8 @@ venv/
 browser_profile/
 bot.log
 config.json
+all_followers*
+debug_*
+memory/
+seen_followers.json
+perf_*
