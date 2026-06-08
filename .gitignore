@@ -1,0 +1,4 @@
+venv/
+browser_profile/
+bot.log
+config.json
