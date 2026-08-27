@@ -7,4 +7,6 @@ perf.json
 debug_*
 memory/
 seen_followers.json
+contacts.json
 run_output.txt
+server.log

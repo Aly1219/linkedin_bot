@@ -6,5 +6,5 @@ services:
     volumes:
       - ./config.json:/app/config.json
       - ./browser_profile:/app/browser_profile
-      - ./seen_followers.json:/app/seen_followers.json
+      - ./contacts.json:/app/contacts.json
     restart: unless-stopped
