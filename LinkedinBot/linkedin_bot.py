@@ -422,9 +422,21 @@ def run():
         idx = args.index("--test-message")
         category = None
         test_url = args[idx + 1] if idx + 1 < len(args) else ""
+    elif "--send-once" in args or "--simulate-once" in args:
+        flag = "--send-once" if "--send-once" in args else "--simulate-once"
+        mode = "send_once" if flag == "--send-once" else "sim_once"
+        category = None
+        idx = args.index(flag)
+        once_urls = args[idx + 1:]
     else:
-        log.error("Usage : --refresh | --send <cat> | --simulate <cat> | --test-message <url>")
+        log.error("Usage : --refresh | --send <cat> | --simulate <cat> | --test-message <url> | --send-once <url> [url2 …]")
         return
+
+    # ── Filtre optionnel sur une sélection d'abonnés (--urls url1 url2 …) ──────
+    selected_urls = None
+    if "--urls" in args:
+        idx = args.index("--urls")
+        selected_urls = set(args[idx + 1:])
 
     log.info("=" * 50)
 
@@ -487,6 +499,8 @@ def run():
 
         contacts = load_contacts()
         to_contact = [c for c in contacts if get_category(c) == category]
+        if selected_urls is not None:
+            to_contact = [c for c in to_contact if c["url"] in selected_urls]
         action = "SIMULATION" if mode == "simulate" else "ENVOI"
         log.info(f"Mode {action} — {CATEGORY_LABEL[category]} — {len(to_contact)} abonnés — {now_str}")
 
@@ -525,6 +539,41 @@ def run():
         perf["total_s"] = round(time.time() - run_start, 1)
         save_perf(perf)
         log.info(f"Pipeline terminé en {perf['total_s']}s.")
+        return
+
+    # ── MESSAGE PONCTUEL (send_once / sim_once) ───────────────────────────────
+    if mode in ("send_once", "sim_once"):
+        if not once_urls:
+            log.error("❌ Aucun destinataire sélectionné pour le message ponctuel.")
+            return
+
+        once_message = config.get("message_once", "")
+        if not once_message.strip():
+            log.error("❌ Message ponctuel vide. Configure-le dans l'interface.")
+            return
+
+        contacts_by_url = {c["url"]: c for c in load_contacts()}
+        targets = [{"url": u, "name": contacts_by_url.get(u, {}).get("name", "")} for u in once_urls]
+
+        action = "SIMULATION" if mode == "sim_once" else "ENVOI"
+        log.info(f"Mode {action} PONCTUEL — {len(targets)} destinataire(s) — {now_str}")
+
+        with sync_playwright() as p:
+            bot = LinkedInBot(config, once_message)
+            bot.start(p)
+            try:
+                bot.login()
+                for t in targets:
+                    if mode == "sim_once":
+                        bot.simulate_message(t["url"], t["name"])
+                    else:
+                        bot.send_message(t["url"], t["name"])
+                    if mode != "sim_once" and t is not targets[-1]:
+                        human_delay(10, 20)
+            finally:
+                bot.stop()
+
+        log.info(f"Message ponctuel terminé en {round(time.time() - run_start, 1)}s.")
         return
 
     # ── TEST MESSAGE ──────────────────────────────────────────────────────────

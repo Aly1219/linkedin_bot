@@ -159,6 +159,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:
   </nav>
 
   <nav class="nav-section">
+    <div class="nav-label">Contact direct</div>
+    <div class="nav-item" data-view="once" onclick="navigate('once')">
+      <span class="nav-icon">✉️</span> Message ponctuel
+    </div>
+  </nav>
+
+  <nav class="nav-section">
     <div class="nav-label">Réglages</div>
     <div class="nav-item" data-view="settings" onclick="navigate('settings')">
       <span class="nav-icon">⚙️</span> Paramètres
@@ -251,11 +258,9 @@ async function tick() {
   updateBadges();
   updateStatus(d.running);
 
-  if (currentView === 'dashboard') {
-    updateDashboardCounts();
-    const box = document.getElementById('log-box');
-    if (box) { box.textContent = d.output || ''; box.scrollTop = box.scrollHeight; }
-  }
+  if (currentView === 'dashboard') updateDashboardCounts();
+  const box = document.getElementById('log-box');
+  if (box) { box.textContent = d.output || ''; box.scrollTop = box.scrollHeight; }
 
   if (!d.running && running) {
     running = false;
@@ -295,6 +300,7 @@ function navigate(view) {
   const main = document.getElementById('main');
   if (view === 'dashboard')   main.innerHTML = renderDashboard();
   else if (view === 'settings') main.innerHTML = renderSettings();
+  else if (view === 'once') renderOnceView();
   else if (view === 'responded') renderCategoryView('responded');
   else renderCategoryView(view);
 }
@@ -352,14 +358,22 @@ async function renderCategoryView(cat) {
       <div class="msg-hint">Variables disponibles : <b>{prenom}</b>, <b>{nom}</b></div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <button class="btn btn-gray btn-sm" onclick="saveMsg('${cat}')">💾 Sauvegarder</button>
-        <button class="btn btn-violet btn-sm" onclick="runBot('sim_${cat}')">⚡ Simuler</button>
-        <button class="btn btn-green btn-sm" onclick="confirmSend('${cat}')">✉ Envoyer à tous</button>
+        <button class="btn btn-violet btn-sm" onclick="runBot('sim_${cat}', {urls: Array.from(window._catSelected||[])})">⚡ Simuler</button>
+        <button class="btn btn-green btn-sm" onclick="confirmSend('${cat}')">✉ Envoyer à la sélection</button>
         <span class="save-ok" id="save-ok">✓ Sauvegardé</span>
       </div>
     </div>` : ''}
     <div class="card">
       <div class="card-title">Liste des abonnés</div>
       <input class="search-bar" id="cat-search" placeholder="Rechercher par nom…" oninput="filterList()">
+      ${!isResponded ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0 4px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:#475569;cursor:pointer">
+          <input type="checkbox" id="select-all-cb" checked onchange="toggleSelectAll(this.checked)">
+          Tout sélectionner
+        </label>
+        <span style="font-size:.75rem;color:#94a3b8" id="select-count"></span>
+      </div>` : ''}
       <ul class="contact-list" id="contact-list">
         <li class="empty-state">Chargement…</li>
       </ul>
@@ -372,6 +386,7 @@ async function renderCategoryView(cat) {
 
   const contacts = await apiFetch('GET', `/api/contacts/${cat}`);
   window._catContacts = contacts;
+  window._catSelected = new Set(contacts.map(c => c.url));
   renderContactList(contacts, cat);
 }
 
@@ -381,6 +396,30 @@ function filterList() {
   renderContactList(filtered, currentView);
 }
 
+function toggleContactSelected(url, checked) {
+  if (!window._catSelected) window._catSelected = new Set();
+  if (checked) window._catSelected.add(url);
+  else window._catSelected.delete(url);
+  updateSelectCount();
+  const allCb = document.getElementById('select-all-cb');
+  if (allCb) allCb.checked = (window._catContacts||[]).length > 0 && (window._catContacts||[]).every(c => window._catSelected.has(c.url));
+}
+
+function toggleSelectAll(checked) {
+  const list = window._catContacts || [];
+  window._catSelected = checked ? new Set(list.map(c => c.url)) : new Set();
+  document.querySelectorAll('.contact-cb').forEach(cb => cb.checked = checked);
+  updateSelectCount();
+}
+
+function updateSelectCount() {
+  const el = document.getElementById('select-count');
+  if (!el) return;
+  const total = (window._catContacts || []).length;
+  const sel = window._catSelected ? window._catSelected.size : 0;
+  el.textContent = `${sel}/${total} sélectionné(s)`;
+}
+
 function renderContactList(contacts, cat) {
   const ul = document.getElementById('contact-list');
   if (!ul) return;
@@ -388,6 +427,7 @@ function renderContactList(contacts, cat) {
     ul.innerHTML = '<li class="empty-state">Aucun abonné dans cette catégorie.</li>';
     return;
   }
+  const selectable = cat !== 'responded';
   ul.innerHTML = contacts.map(c => {
     const initials = c.name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
     const profileUrl = c.url;
@@ -395,7 +435,11 @@ function renderContactList(contacts, cat) {
       ? `<button class="btn btn-gray btn-sm" onclick="unmarkResponded('${escAttr(c.url)}', '${escAttr(c.name)}')">↩ Retirer</button>`
       : `<button class="btn btn-sm" style="background:#f1f5f9;color:#475569" onclick="markResponded('${escAttr(c.url)}', '${escAttr(c.name)}')">✅ A répondu</button>`;
     const meta = c.last_contacted ? `Contacté le ${c.last_contacted}` : 'Jamais contacté';
+    const checkbox = selectable
+      ? `<input type="checkbox" class="contact-cb" ${window._catSelected?.has(c.url) ? 'checked' : ''} onchange="toggleContactSelected('${escAttr(c.url)}', this.checked)" style="flex-shrink:0">`
+      : '';
     return `<li class="contact-item">
+      ${checkbox}
       <div class="contact-avatar c-${cat}" style="background:${CATS[cat]?.color || '#0077b5'}">${initials}</div>
       <div style="flex:1;min-width:0">
         <div class="contact-name">${escHtml(c.name)}</div>
@@ -407,6 +451,127 @@ function renderContactList(contacts, cat) {
       </div>
     </li>`;
   }).join('');
+  if (selectable) updateSelectCount();
+}
+
+// ── MESSAGE PONCTUEL ──────────────────────────────────────────────────────
+async function renderOnceView() {
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <h1 class="page-title">Message ponctuel
+      <div class="page-subtitle">Envoie un message à des contacts choisis, sans impacter leurs relances</div>
+    </h1>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">Message</div>
+      <textarea class="msg-editor" id="once-editor" placeholder="Bonjour {prenom},&#10;&#10;…">${escHtml(cfg.message_once || '')}</textarea>
+      <div class="msg-hint">Variables disponibles : <b>{prenom}</b>, <b>{nom}</b></div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-gray btn-sm" onclick="saveOnceMsg()">💾 Sauvegarder</button>
+        <button class="btn btn-violet btn-sm" onclick="runOnce('sim_once')">⚡ Simuler</button>
+        <button class="btn btn-green btn-sm" onclick="confirmOnce()">✉ Envoyer à la sélection</button>
+        <span class="save-ok" id="once-save-ok">✓ Sauvegardé</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Destinataires</div>
+      <input class="search-bar" id="once-search" placeholder="Rechercher un abonné par nom…" oninput="filterOnceContacts()">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:10px 0 4px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:#475569;cursor:pointer">
+          <input type="checkbox" id="once-select-all-cb" onchange="toggleOnceSelectAll(this.checked)">
+          Tout sélectionner
+        </label>
+        <span style="font-size:.75rem;color:#94a3b8" id="once-select-count"></span>
+      </div>
+      <ul class="contact-list" id="once-contact-list"></ul>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Logs en direct</div>
+      <div class="log-box" id="log-box">En attente d'une action…</div>
+    </div>`;
+
+  window._onceAllContacts = await apiFetch('GET', '/api/contacts');
+  window._onceSelected = new Set();
+  renderOnceContactList(window._onceAllContacts);
+}
+
+function filterOnceContacts() {
+  const q = (document.getElementById('once-search')?.value || '').toLowerCase();
+  const filtered = (window._onceAllContacts || []).filter(c => c.name.toLowerCase().includes(q));
+  renderOnceContactList(filtered);
+}
+
+function renderOnceContactList(contacts) {
+  const ul = document.getElementById('once-contact-list');
+  if (!ul) return;
+  if (!contacts.length) { ul.innerHTML = '<li class="empty-state">Aucun résultat.</li>'; return; }
+  ul.innerHTML = contacts.map(c => {
+    const initials = c.name.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
+    return `<li class="contact-item">
+      <input type="checkbox" class="once-cb" ${window._onceSelected?.has(c.url) ? 'checked' : ''} onchange="toggleOnceContact('${escAttr(c.url)}', this.checked)" style="flex-shrink:0">
+      <div class="contact-avatar" style="background:${CATS[c._category]?.color || '#0077b5'}">${initials}</div>
+      <div style="flex:1;min-width:0">
+        <div class="contact-name">${escHtml(c.name)}</div>
+        <div class="contact-meta">${CATS[c._category]?.label || ''}</div>
+      </div>
+      <div class="contact-actions">
+        <a class="contact-link" href="${escAttr(c.url)}" target="_blank">Profil ↗</a>
+      </div>
+    </li>`;
+  }).join('');
+  updateOnceSelectCount();
+}
+
+function toggleOnceContact(url, checked) {
+  if (!window._onceSelected) window._onceSelected = new Set();
+  if (checked) window._onceSelected.add(url);
+  else window._onceSelected.delete(url);
+  updateOnceSelectCount();
+  const allCb = document.getElementById('once-select-all-cb');
+  const list = window._onceAllContacts || [];
+  if (allCb) allCb.checked = list.length > 0 && list.every(c => window._onceSelected.has(c.url));
+}
+
+function toggleOnceSelectAll(checked) {
+  const list = window._onceAllContacts || [];
+  window._onceSelected = checked ? new Set(list.map(c => c.url)) : new Set();
+  document.querySelectorAll('.once-cb').forEach(cb => cb.checked = checked);
+  updateOnceSelectCount();
+}
+
+function updateOnceSelectCount() {
+  const el = document.getElementById('once-select-count');
+  if (!el) return;
+  const total = (window._onceAllContacts || []).length;
+  const sel = window._onceSelected ? window._onceSelected.size : 0;
+  el.textContent = `${sel}/${total} sélectionné(s)`;
+}
+
+async function saveOnceMsg() {
+  const val = document.getElementById('once-editor')?.value || '';
+  cfg.message_once = val;
+  await apiFetch('POST', '/api/config', { message_once: val });
+  showOk('once-save-ok');
+}
+
+function confirmOnce() {
+  const selected = Array.from(window._onceSelected || []);
+  if (!selected.length) { alert('Sélectionne au moins un destinataire.'); return; }
+  if (!cfg.message_once?.trim()) {
+    alert('Le message ponctuel est vide.\nConfigure-le avant d\'envoyer.');
+    return;
+  }
+  if (confirm(`Envoyer un message à ${selected.length} destinataire(s) ?\nCette action est irréversible.`))
+    runOnce('send_once', selected);
+}
+
+async function runOnce(mode, urlsParam) {
+  if (running) return;
+  const urls = urlsParam || Array.from(window._onceSelected || []);
+  if (!urls.length) { alert('Sélectionne au moins un destinataire.'); return; }
+  const d = await apiFetch('POST', `/run/${mode}`, { urls });
+  if (d.error) { alert(d.error); return; }
+  running = true;
+  updateStatus(true);
 }
 
 // ── SETTINGS ───────────────────────────────────────────────────────────────
@@ -449,9 +614,10 @@ async function saveMsg(cat) {
   showOk('save-ok');
 }
 
-async function runBot(mode) {
+async function runBot(mode, body) {
   if (running) return;
-  const d = await apiFetch('POST', `/run/${mode}`);
+  if (body && body.urls && !body.urls.length) { alert('Sélectionne au moins un abonné.'); return; }
+  const d = await apiFetch('POST', `/run/${mode}`, body);
   if (d.error) { alert(d.error); return; }
   running = true;
   updateStatus(true);
@@ -459,13 +625,14 @@ async function runBot(mode) {
 
 function confirmSend(cat) {
   const label = CATS[cat]?.label || cat;
-  const n = counts[cat] || 0;
+  const selected = Array.from(window._catSelected || []);
+  if (!selected.length) { alert('Sélectionne au moins un abonné.'); return; }
   if (!cfg[MSG_KEY[cat]]?.trim()) {
     alert(`Le message pour "${label}" est vide.\nConfigure-le avant d'envoyer.`);
     return;
   }
-  if (confirm(`Envoyer un message à ${n} abonné(s) (${label}) ?\nCette action est irréversible.`))
-    runBot('send_' + cat);
+  if (confirm(`Envoyer un message à ${selected.length} abonné(s) (${label}) ?\nCette action est irréversible.`))
+    runBot('send_' + cat, { urls: selected });
 }
 
 // ── Marquer répondu ────────────────────────────────────────────────────────

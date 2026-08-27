@@ -137,10 +137,24 @@ def run_bot(mode):
     global _proc
     if _is_running():
         return jsonify({"error": "Bot déjà en cours d'exécution"}), 409
-    if mode not in VALID_MODES:
-        return jsonify({"error": "Mode inconnu"}), 400
 
-    cmd = [sys.executable, str(BASE_DIR / "linkedin_bot.py")] + VALID_MODES[mode]
+    if mode in ("send_once", "sim_once"):
+        data = request.json or {}
+        urls = [u for u in (data.get("urls") or []) if isinstance(u, str) and u]
+        if not urls:
+            return jsonify({"error": "Sélectionne au moins un destinataire"}), 400
+        flag = "--send-once" if mode == "send_once" else "--simulate-once"
+        cmd = [sys.executable, str(BASE_DIR / "linkedin_bot.py"), flag] + urls
+    elif mode in VALID_MODES:
+        data = request.json or {}
+        urls = data.get("urls")
+        if urls is not None and not urls:
+            return jsonify({"error": "Sélectionne au moins un abonné"}), 400
+        cmd = [sys.executable, str(BASE_DIR / "linkedin_bot.py")] + VALID_MODES[mode]
+        if urls:
+            cmd += ["--urls"] + [u for u in urls if isinstance(u, str) and u]
+    else:
+        return jsonify({"error": "Mode inconnu"}), 400
 
     def _run():
         global _proc
