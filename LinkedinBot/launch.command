@@ -35,11 +35,14 @@ lsof -ti :5000 | xargs kill 2>/dev/null; sleep 0.5
 
 # Ouvrir le navigateur dès que le serveur répond réellement (jusqu'à 30s),
 # au lieu d'un délai fixe qui peut ouvrir une page blanche si Flask n'a pas
-# encore démarré.
+# encore démarré. On force 127.0.0.1 (pas "localhost") et on ignore tout
+# proxy système, sinon la vérification peut échouer en boucle sur un Mac
+# où un proxy réseau est configuré (le navigateur, lui, l'ignore pour
+# localhost — d'où un écart entre "curl échoue" et "ça marche à la main").
 (
   for i in $(seq 1 60); do
-    if curl -sf http://localhost:5000/ >/dev/null 2>&1; then
-      open http://localhost:5000
+    if curl -sf --noproxy '*' http://127.0.0.1:5000/ >/dev/null 2>&1; then
+      open http://127.0.0.1:5000
       break
     fi
     sleep 0.5
